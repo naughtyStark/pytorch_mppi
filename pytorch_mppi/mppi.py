@@ -101,7 +101,8 @@ class MPPI():
                  rollout_var_cost=0,
                  rollout_var_discount=0.95,
                  sample_null_action=False,
-                 noise_abs_cost=False):
+                 noise_abs_cost=False,
+                 num_optimizations=1):
         """
         :param dynamics: function(state, action) -> next_state (K x nx) taking in batch state (K x nx) and action (K x nu)
         :param running_cost: function(state, action) -> cost (K) taking in batch state and action (same as dynamics)
@@ -129,12 +130,12 @@ class MPPI():
         self.dtype = noise_sigma.dtype
         self.K = num_samples  # N_SAMPLES
         self.T = horizon  # TIMESTEPS
-
+        self.print_states = None
         # dimensions of state and control
         self.nx = nx
         self.nu = 1 if len(noise_sigma.shape) == 0 else noise_sigma.shape[0]
         self.lambda_ = lambda_
-
+        self.num_optimizations = num_optimizations
         if noise_mu is None:
             noise_mu = torch.zeros(self.nu, dtype=self.dtype)
 
@@ -195,6 +196,13 @@ class MPPI():
         self.states = None
         self.actions = None
 
+    def update_noise_sigma(self, noise_sigma):
+        noise_mu = torch.zeros(self.nu, dtype=self.dtype)
+        self.noise_mu = noise_mu.to(self.d)
+        self.noise_sigma = noise_sigma.to(self.d)
+        self.noise_sigma_inv = torch.inverse(self.noise_sigma)
+        self.noise_dist = MultivariateNormal(self.noise_mu, covariance_matrix=self.noise_sigma)
+
     @handle_batch_input(n=2)
     def _dynamics(self, state, u, t):
         return self.F(state, u, t) if self.step_dependency else self.F(state, u)
@@ -211,8 +219,11 @@ class MPPI():
         # shift command 1 time step
         self.U = torch.roll(self.U, -1, dims=0)
         self.U[-1] = self.u_init
-
-        return self._command(state)
+        self.hard_cost = 1
+        for i in range(self.num_optimizations):
+            action = self._command(state)
+            self.hard_cost *= 10
+        return action
 
     def _command(self, state):
         if not torch.is_tensor(state):
@@ -272,7 +283,7 @@ class MPPI():
         # States is K x T x nx
         actions = torch.stack(actions, dim=-2)
         states = torch.stack(states, dim=-2)
-
+        self.print_states = states
         # action perturbation cost
         if self.terminal_state_cost:
             c = self.terminal_state_cost(states, actions)
@@ -310,11 +321,8 @@ class MPPI():
         return self.cost_total
 
     def _bound_action(self, action):
-        if self.u_max is not None:
-            for t in range(self.T):
-                u = action[:, self._slice_control(t)]
-                cu = torch.max(torch.min(u, self.u_max), self.u_min)
-                action[:, self._slice_control(t)] = cu
+        if self.u_max is not None and self.u_min is not None:
+            action = torch.clamp(action, self.u_min, self.u_max)
         return action
 
     def _slice_control(self, t):
