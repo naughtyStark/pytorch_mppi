@@ -102,7 +102,8 @@ class MPPI():
                  rollout_var_discount=0.95,
                  sample_null_action=False,
                  noise_abs_cost=False,
-                 num_optimizations=1):
+                 num_optimizations=1,
+                 percent_elites=0.4):
         """
         :param dynamics: function(state, action) -> next_state (K x nx) taking in batch state (K x nx) and action (K x nu)
         :param running_cost: function(state, action) -> cost (K) taking in batch state and action (same as dynamics)
@@ -131,6 +132,8 @@ class MPPI():
         self.K = num_samples  # N_SAMPLES
         self.T = horizon  # TIMESTEPS
         self.print_states = None
+        self.num_elites = int(self.K*percent_elites)
+
         # dimensions of state and control
         self.nx = nx
         self.nu = 1 if len(noise_sigma.shape) == 0 else noise_sigma.shape[0]
@@ -169,6 +172,7 @@ class MPPI():
         self.noise_sigma = noise_sigma.to(self.d)
         self.noise_sigma_inv = torch.inverse(self.noise_sigma)
         self.noise_dist = MultivariateNormal(self.noise_mu, covariance_matrix=self.noise_sigma)
+        self.noise_sigma_original = self.noise_sigma.clone()
         # T x nu control sequence
         self.U = U_init
         self.u_init = u_init.to(self.d)
@@ -219,7 +223,11 @@ class MPPI():
         # shift command 1 time step
         self.U = torch.roll(self.U, -1, dims=0)
         self.U[-1] = self.u_init
-        self.hard_cost = 1
+        if(self.num_optimizations == 1):
+            self.hard_cost = 100
+        else:
+            self.hard_cost = 1
+        self.update_noise_sigma(self.noise_sigma_original)  # reset before restarting.
         for i in range(self.num_optimizations):
             action = self._command(state)
             self.hard_cost *= 10
@@ -237,6 +245,14 @@ class MPPI():
         for t in range(self.T):
             self.U[t] += torch.sum(self.omega.view(-1, 1) * self.noise[:, t], dim=0)
         action = self.U[:self.u_per_command]
+
+
+        ## CEM cov estimation:
+        top_costs, topk = torch.topk(cost_total, self.num_elites, largest=False, sorted=False)
+        top_samples = self.noise[topk]
+        cov = torch.cov((top_samples.reshape(self.num_elites*self.T, self.nu)).T)
+        self.update_noise_sigma(cov)
+        ## ----------------------
         # reduce dimensionality if we only need the first command
         if self.u_per_command == 1:
             action = action[0]
