@@ -227,10 +227,10 @@ class MPPI():
             self.hard_cost = 100
         else:
             self.hard_cost = 1
-        self.update_noise_sigma(self.noise_sigma_original)  # reset before restarting.
         for i in range(self.num_optimizations):
             action = self._command(state)
             self.hard_cost *= 10
+        self.update_noise_sigma(self.noise_sigma_original)  # reset before restarting.
         return action
 
     def _command(self, state):
@@ -248,10 +248,11 @@ class MPPI():
 
 
         ## CEM cov estimation:
-        top_costs, topk = torch.topk(cost_total, self.num_elites, largest=False, sorted=False)
-        top_samples = self.noise[topk]
-        cov = torch.cov((top_samples.reshape(self.num_elites*self.T, self.nu)).T)
-        self.update_noise_sigma(cov)
+        if(self.num_optimizations > 1):
+            top_costs, topk = torch.topk(cost_total, self.num_elites, largest=False, sorted=False)
+            top_samples = self.noise[topk]
+            cov = torch.cov((top_samples.reshape(self.num_elites*self.T, self.nu)).T)
+            self.update_noise_sigma(cov)
         ## ----------------------
         # reduce dimensionality if we only need the first command
         if self.u_per_command == 1:
